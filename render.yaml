@@ -2,7 +2,7 @@ services:
   - type: web
     name: image-filter-api
     runtime: python
-    region: us-east
+    region: ohio
     plan: free
     branch: main
     buildCommand: pip install --no-cache-dir -r requirements.txt
