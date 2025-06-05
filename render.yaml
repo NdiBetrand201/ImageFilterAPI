@@ -10,6 +10,6 @@ services:
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
-        value: 3.10
+        value: 3.10.14
       - key: PORT
         sync: false
