@@ -6,6 +6,7 @@ import numpy as np
 import base64
 import logging
 from typing import Callable
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
