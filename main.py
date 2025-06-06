@@ -11,6 +11,11 @@ from typing import Dict, Any, Optional
 import uvicorn
 import logging
 
+import time  # Added missing import
+
+import numpy as np
+
+from typing import Callable
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -330,6 +335,46 @@ async def process_image(
         logger.error(f"Error processing image: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
+# Helper functions (implement these based on your image processing logic)
+def apply_per_channel(image: np.ndarray, func: Callable) -> np.ndarray:
+    """Apply a function to each channel of the image."""
+    # Example implementation (replace with your actual logic)
+    channels = cv2.split(image)
+    processed_channels = [func(ch) for ch in channels]
+    return cv2.merge(processed_channels)
+
+def gaussian_blur(image: np.ndarray, size: int, sigma: float) -> np.ndarray:
+    """Apply Gaussian blur to an image."""
+    return cv2.GaussianBlur(image, (size, size), sigma)
+
+def laplacian_sharpen(image: np.ndarray) -> np.ndarray:
+    """Apply Laplacian sharpening to an image."""
+    laplacian = cv2.Laplacian(image, cv2.CV_64F)
+    return cv2.convertScaleAbs(image - laplacian)
+
+def adaptive_blur_sharpen_color(image: np.ndarray, blur_sigma: float, ksize: int, var_threshold: float) -> np.ndarray:
+    """Apply adaptive blur/sharpen to a color image."""
+    # Placeholder (implement your logic)
+    return cv2.GaussianBlur(image, (ksize, ksize), blur_sigma)  # Example
+
+def improved_adaptive_filter(image: np.ndarray, blur_sigma: float, ksize: int, var_threshold_low: float, var_threshold_high: float) -> np.ndarray:
+    """Apply improved adaptive filter to an image."""
+    # Placeholder (implement your logic)
+    return cv2.GaussianBlur(image, (ksize, ksize), blur_sigma)  # Example
+
+def psnr_color(original: np.ndarray, processed: np.ndarray) -> float:
+    """Calculate PSNR for a color image."""
+    mse = np.mean((original - processed) ** 2)
+    if mse == 0:
+        return float('inf')
+    max_pixel = 255.0
+    return 20 * np.log10(max_pixel / np.sqrt(mse))
+
+def image_to_base64(image: np.ndarray) -> str:
+    """Convert an image to base64 string."""
+    _, buffer = cv2.imencode('.png', image)
+    return base64.b64encode(buffer).decode('utf-8')
+
 @app.post("/process-single-filter")
 async def process_single_filter(
     file: UploadFile = File(...),
@@ -351,8 +396,6 @@ async def process_single_filter(
         
         if var_threshold_high <= var_threshold_low:
             raise HTTPException(status_code=400, detail="High threshold must be greater than low threshold")
-        
-      
         
         # Read and decode image
         contents = await file.read()
