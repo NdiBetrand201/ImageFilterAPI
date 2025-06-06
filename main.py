@@ -169,9 +169,9 @@ async def process_image(
         if var_threshold_high <= var_threshold_low:
             raise HTTPException(status_code=400, detail="High threshold must be greater than low threshold")
         
-        # Validate file type
-        if not file.content_type or not file.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="File must be an image")
+        # # Validate file type
+        # if not file.content_type or not file.content_type.startswith('image/'):
+        #     raise HTTPException(status_code=400, detail="File must be an image")
         
         # Check file size (10MB limit)
         contents = await file.read()
