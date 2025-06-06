@@ -1,21 +1,12 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.responses import JSONResponse
+
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
 import base64
-import io
-from PIL import Image
-import json
-from typing import Dict, Any, Optional
-import uvicorn
 import logging
-
-import time  # Added missing import
-
-import numpy as np
-
 from typing import Callable
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,7 +22,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Image processing functions from your notebook
+# Image processing functions
 def convolve(image, kernel):
     h, w = image.shape
     kh, kw = kernel.shape
@@ -59,9 +50,9 @@ def gaussian_blur(image, size=5, sigma=1.0):
 
 def laplacian_sharpen(image):
     laplacian_kernel = np.array([
-        [0, -1,  0],
-        [-1,  4, -1],
-        [0, -1,  0]
+        [0, -1, 0],
+        [-1, 4, -1],
+        [0, -1, 0]
     ])
     laplacian = convolve(image, laplacian_kernel)
     sharpened = np.clip(image + laplacian, 0, 255)
@@ -97,53 +88,41 @@ def improved_adaptive_filter(image, blur_sigma=1.0, ksize=5, var_threshold_low=5
         sharpened = laplacian_sharpen(c)
         var_map = local_variance(c, ksize)
         
-        # Normalize to [0, 1] based on thresholds
         alpha = np.clip((var_map - var_threshold_low) / (var_threshold_high - var_threshold_low), 0, 1)
-        # Blend based on alpha: more blur in low-var, more sharpen in high-var
         output = (1 - alpha) * blurred + alpha * sharpened
         result_channels.append(np.clip(output, 0, 255).astype(np.uint8))
     
     return cv2.merge(result_channels)
 
-def apply_per_channel(image, filter_func):
+def apply_per_channel(image, func: Callable) -> np.ndarray:
     channels = cv2.split(image)
-    processed = [filter_func(c) for c in channels]
+    processed = [func(c) for c in channels]
     return cv2.merge(processed)
 
 def psnr(original, processed):
     original = original.astype(np.float32)
     processed = processed.astype(np.float32)
     mse = np.mean((original - processed) ** 2)
-    if mse == 0:
-        return float('inf')
+    if mse == 0 or np.isnan(mse):
+        return 100.0  # Use finite value instead of inf or NaN
     return 10 * np.log10(255**2 / mse)
 
-def psnr_color(original, processed):
+def psnr_color(original: np.ndarray, processed: np.ndarray) -> float:
     channels_orig = cv2.split(original)
     channels_proc = cv2.split(processed)
-    return np.mean([psnr(o, p) for o, p in zip(channels_orig, channels_proc)])
+    psnr_values = [psnr(o, p) for o, p in zip(channels_orig, channels_proc)]
+    mean_psnr = np.mean([v for v in psnr_values if not np.isnan(v)])
+    return 100.0 if np.isnan(mean_psnr) else round(mean_psnr, 2)
 
-def image_to_base64(image):
-    """Convert OpenCV image to base64 string with better compression"""
-    # Use PNG for lossless compression or JPEG with high quality
+def image_to_base64(image: np.ndarray) -> str:
     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
     _, buffer = cv2.imencode('.jpg', image, encode_param)
-    img_base64 = base64.b64encode(buffer).decode('utf-8')
-    return img_base64
+    return base64.b64encode(buffer).decode('utf-8')
 
-def base64_to_image(base64_string):
-    """Convert base64 string to OpenCV image"""
+def base64_to_image(base64_string: str) -> np.ndarray:
     img_data = base64.b64decode(base64_string)
     nparr = np.frombuffer(img_data, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    return image
-
-def validate_image_size(image, max_size_mb=10):
-    """Validate image size"""
-    height, width = image.shape[:2]
-    # Estimate size (rough calculation)
-    estimated_size_mb = (height * width * 3) / (1024 * 1024)
-    return estimated_size_mb <= max_size_mb
+    return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
 @app.get("/")
 async def root():
@@ -162,147 +141,67 @@ async def process_image(
     var_threshold_low: float = Form(50.0),
     var_threshold_high: float = Form(1000.0)
 ):
-    """
-    Process uploaded image with various filters and return results with PSNR metrics
-    Enhanced version with better error handling and validation
-    """
     try:
-        # Validate parameters
         if kernel_size % 2 == 0:
             raise HTTPException(status_code=400, detail="Kernel size must be an odd number")
-        
         if var_threshold_high <= var_threshold_low:
             raise HTTPException(status_code=400, detail="High threshold must be greater than low threshold")
         
-        # # Validate file type
-        # if not file.content_type or not file.content_type.startswith('image/'):
-        #     raise HTTPException(status_code=400, detail="File must be an image")
-        
-        # Check file size (10MB limit)
         contents = await file.read()
-        if len(contents) > 10 * 1024 * 1024:  # 10MB
+        if len(contents) > 10 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="Image size exceeds 10MB limit")
         
-        # Read and decode image
         nparr = np.frombuffer(contents, np.uint8)
         original_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if original_image is None:
             raise HTTPException(status_code=400, detail="Could not decode image. Please use JPG or PNG format")
         
-        # Validate supported formats
         if not any(file.filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png']):
             raise HTTPException(status_code=400, detail="Only JPG and PNG formats are supported")
         
         logger.info(f"Processing image: {file.filename}, Size: {original_image.shape}")
         
-        # Get image dimensions
         height, width, channels = original_image.shape
-        
-        # Apply different filters
         results = {}
-        
-        # 1. Original image
         original_b64 = image_to_base64(original_image)
         results["original"] = {
             "name": "Original",
             "description": "Original uploaded image",
             "image": original_b64,
-            "psnr": float('inf'),
+            "psnr": 100.0,  # Use finite value
             "parameters": {},
             "processing_time": 0.0
         }
         
-        # 2. Gaussian Blur
-        import time
-        start_time = time.time()
-        blurred_color = apply_per_channel(original_image, 
-                                        lambda img: gaussian_blur(img, size=kernel_size, sigma=blur_sigma))
-        blur_time = time.time() - start_time
-        blur_psnr = psnr_color(original_image, blurred_color)
-        results["gaussian_blur"] = {
-            "name": "Gaussian Blur",
-            "description": "Smoothing filter that reduces noise and detail",
-            "image": image_to_base64(blurred_color),
-            "psnr": round(blur_psnr, 2),
-            "processing_time": round(blur_time, 2),
-            "parameters": {
-                "sigma": blur_sigma,
-                "kernel_size": kernel_size
+        filters = [
+            ("gaussian_blur", lambda img: apply_per_channel(img, lambda c: gaussian_blur(c, size=kernel_size, sigma=blur_sigma))),
+            ("laplacian_sharpen", lambda img: apply_per_channel(img, laplacian_sharpen)),
+            ("adaptive_filter", lambda img: adaptive_blur_sharpen_color(img, blur_sigma=blur_sigma, ksize=kernel_size, var_threshold=var_threshold)),
+            ("improved_adaptive", lambda img: improved_adaptive_filter(img, blur_sigma=blur_sigma, ksize=kernel_size, var_threshold_low=var_threshold_low, var_threshold_high=var_threshold_high))
+        ]
+
+        total_processing_time = 0
+        for filter_type, func in filters:
+            start_time = time.time()
+            processed = func(original_image)
+            filter_time = time.time() - start_time
+            total_processing_time += filter_time
+            psnr_value = psnr_color(original_image, processed)
+            results[filter_type] = {
+                "name": filter_type.replace('_', ' ').title(),
+                "description": f"{filter_type.replace('_', ' ').title()} applied",
+                "image": image_to_base64(processed),
+                "psnr": psnr_value,
+                "processing_time": round(filter_time, 2),
+                "parameters": {
+                    "blur_sigma": blur_sigma,
+                    "kernel_size": kernel_size,
+                    **({"var_threshold": var_threshold} if filter_type == "adaptive_filter" else {}),
+                    **({"var_threshold_low": var_threshold_low, "var_threshold_high": var_threshold_high} if filter_type == "improved_adaptive" else {})
+                }
             }
-        }
-        
-        # 3. Laplacian Sharpening
-        start_time = time.time()
-        sharpened_color = apply_per_channel(original_image, laplacian_sharpen)
-        sharpen_time = time.time() - start_time
-        sharpen_psnr = psnr_color(original_image, sharpened_color)
-        results["laplacian_sharpen"] = {
-            "name": "Laplacian Sharpening",
-            "description": "Edge enhancement filter that increases detail and contrast",
-            "image": image_to_base64(sharpened_color),
-            "psnr": round(sharpen_psnr, 2),
-            "processing_time": round(sharpen_time, 2),
-            "parameters": {
-                "kernel": "Laplacian 3x3"
-            }
-        }
-        
-        # 4. Adaptive Filter (Original)
-        start_time = time.time()
-        adaptive_color = adaptive_blur_sharpen_color(
-            original_image, 
-            blur_sigma=blur_sigma, 
-            ksize=kernel_size, 
-            var_threshold=var_threshold
-        )
-        adaptive_time = time.time() - start_time
-        adaptive_psnr = psnr_color(original_image, adaptive_color)
-        results["adaptive_filter"] = {
-            "name": "Adaptive Filter",
-            "description": "Applies blur to smooth areas and sharpening to detailed areas",
-            "image": image_to_base64(adaptive_color),
-            "psnr": round(adaptive_psnr, 2),
-            "processing_time": round(adaptive_time, 2),
-            "parameters": {
-                "blur_sigma": blur_sigma,
-                "kernel_size": kernel_size,
-                "variance_threshold": var_threshold
-            }
-        }
-        
-        # 5. Improved Adaptive Filter
-        start_time = time.time()
-        improved_adaptive = improved_adaptive_filter(
-            original_image,
-            blur_sigma=blur_sigma,
-            ksize=kernel_size,
-            var_threshold_low=var_threshold_low,
-            var_threshold_high=var_threshold_high
-        )
-        improved_time = time.time() - start_time
-        improved_psnr = psnr_color(original_image, improved_adaptive)
-        results["improved_adaptive"] = {
-            "name": "Improved Adaptive Filter",
-            "description": "Advanced adaptive filter with smooth blending between blur and sharpen",
-            "image": image_to_base64(improved_adaptive),
-            "psnr": round(improved_psnr, 2),
-            "processing_time": round(improved_time, 2),
-            "parameters": {
-                "blur_sigma": blur_sigma,
-                "kernel_size": kernel_size,
-                "var_threshold_low": var_threshold_low,
-                "var_threshold_high": var_threshold_high
-            }
-        }
-        
-        # Summary statistics
-        psnr_values = [v["psnr"] for v in results.values() if v["psnr"] != float('inf')]
-        best_filter = max(
-            [(k, v["psnr"]) for k, v in results.items() if v["psnr"] != float('inf')],
-            key=lambda x: x[1]
-        ) if psnr_values else ("none", 0)
-        
+
         summary = {
             "image_info": {
                 "width": int(width),
@@ -312,12 +211,12 @@ async def process_image(
                 "file_size_mb": round(len(contents) / (1024 * 1024), 2)
             },
             "processing_results": {
-                "total_filters": len(results) - 1,  # Exclude original
+                "total_filters": len(filters),
                 "best_psnr": {
-                    "filter": best_filter[0],
-                    "value": round(best_filter[1], 2) if best_filter[1] != float('inf') else 0
+                    "filter": max([(k, v["psnr"]) for k, v in results.items() if k != "original"], key=lambda x: x[1])[0],
+                    "value": round(max([(v["psnr"]) for k, v in results.items() if k != "original"]), 2)
                 },
-                "total_processing_time": round(sum([v.get("processing_time", 0) for v in results.values()]), 2)
+                "total_processing_time": round(total_processing_time, 2)
             }
         }
         
@@ -335,46 +234,6 @@ async def process_image(
         logger.error(f"Error processing image: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
-# Helper functions (implement these based on your image processing logic)
-def apply_per_channel(image: np.ndarray, func: Callable) -> np.ndarray:
-    """Apply a function to each channel of the image."""
-    # Example implementation (replace with your actual logic)
-    channels = cv2.split(image)
-    processed_channels = [func(ch) for ch in channels]
-    return cv2.merge(processed_channels)
-
-def gaussian_blur(image: np.ndarray, size: int, sigma: float) -> np.ndarray:
-    """Apply Gaussian blur to an image."""
-    return cv2.GaussianBlur(image, (size, size), sigma)
-
-def laplacian_sharpen(image: np.ndarray) -> np.ndarray:
-    """Apply Laplacian sharpening to an image."""
-    laplacian = cv2.Laplacian(image, cv2.CV_64F)
-    return cv2.convertScaleAbs(image - laplacian)
-
-def adaptive_blur_sharpen_color(image: np.ndarray, blur_sigma: float, ksize: int, var_threshold: float) -> np.ndarray:
-    """Apply adaptive blur/sharpen to a color image."""
-    # Placeholder (implement your logic)
-    return cv2.GaussianBlur(image, (ksize, ksize), blur_sigma)  # Example
-
-def improved_adaptive_filter(image: np.ndarray, blur_sigma: float, ksize: int, var_threshold_low: float, var_threshold_high: float) -> np.ndarray:
-    """Apply improved adaptive filter to an image."""
-    # Placeholder (implement your logic)
-    return cv2.GaussianBlur(image, (ksize, ksize), blur_sigma)  # Example
-
-def psnr_color(original: np.ndarray, processed: np.ndarray) -> float:
-    """Calculate PSNR for a color image."""
-    mse = np.mean((original - processed) ** 2)
-    if mse == 0:
-        return float('inf')
-    max_pixel = 255.0
-    return 20 * np.log10(max_pixel / np.sqrt(mse))
-
-def image_to_base64(image: np.ndarray) -> str:
-    """Convert an image to base64 string."""
-    _, buffer = cv2.imencode('.png', image)
-    return base64.b64encode(buffer).decode('utf-8')
-
 @app.post("/process-single-filter")
 async def process_single_filter(
     file: UploadFile = File(...),
@@ -385,21 +244,14 @@ async def process_single_filter(
     var_threshold_low: float = Form(50.0),
     var_threshold_high: float = Form(1000.0)
 ):
-    """
-    Process image with a single specified filter
-    Enhanced version with better error handling
-    """
     try:
-        # Validate parameters
         if kernel_size % 2 == 0:
             raise HTTPException(status_code=400, detail="Kernel size must be an odd number")
-        
         if var_threshold_high <= var_threshold_low:
             raise HTTPException(status_code=400, detail="High threshold must be greater than low threshold")
         
-        # Read and decode image
         contents = await file.read()
-        if len(contents) > 10 * 1024 * 1024:  # 10MB
+        if len(contents) > 10 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="Image size exceeds 10MB limit")
         
         nparr = np.frombuffer(contents, np.uint8)
@@ -408,22 +260,15 @@ async def process_single_filter(
         if original_image is None:
             raise HTTPException(status_code=400, detail="Could not decode image. Please use JPG or PNG format")
         
-        # Apply selected filter
         start_time = time.time()
         if filter_type == "gaussian_blur":
-            processed = apply_per_channel(original_image, 
-                                        lambda img: gaussian_blur(img, size=kernel_size, sigma=blur_sigma))
+            processed = apply_per_channel(original_image, lambda img: gaussian_blur(img, size=kernel_size, sigma=blur_sigma))
         elif filter_type == "laplacian_sharpen":
             processed = apply_per_channel(original_image, laplacian_sharpen)
         elif filter_type == "adaptive_filter":
-            processed = adaptive_blur_sharpen_color(
-                original_image, blur_sigma=blur_sigma, ksize=kernel_size, var_threshold=var_threshold
-            )
+            processed = adaptive_blur_sharpen_color(original_image, blur_sigma=blur_sigma, ksize=kernel_size, var_threshold=var_threshold)
         elif filter_type == "improved_adaptive":
-            processed = improved_adaptive_filter(
-                original_image, blur_sigma=blur_sigma, ksize=kernel_size,
-                var_threshold_low=var_threshold_low, var_threshold_high=var_threshold_high
-            )
+            processed = improved_adaptive_filter(original_image, blur_sigma=blur_sigma, ksize=kernel_size, var_threshold_low=var_threshold_low, var_threshold_high=var_threshold_high)
         else:
             raise HTTPException(status_code=400, detail="Invalid filter type. Available: gaussian_blur, laplacian_sharpen, adaptive_filter, improved_adaptive")
         
@@ -435,7 +280,7 @@ async def process_single_filter(
             "filter_type": filter_type,
             "original_image": image_to_base64(original_image),
             "processed_image": image_to_base64(processed),
-            "psnr": round(psnr_value, 2),
+            "psnr": psnr_value,
             "processing_time": round(processing_time, 2),
             "image_info": {
                 "width": original_image.shape[1],
@@ -454,9 +299,6 @@ async def process_single_filter(
 
 @app.get("/available-filters")
 async def get_available_filters():
-    """
-    Get list of available filters with their descriptions and parameter ranges
-    """
     filters = {
         "gaussian_blur": {
             "name": "Gaussian Blur",
@@ -503,4 +345,5 @@ async def get_available_filters():
     }
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
